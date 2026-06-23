@@ -1,11 +1,14 @@
 // ==UserScript==
 // @name         Neopets Fetch! Autoplayer
 // @namespace    GreaseMonkey
-// @version      1.0
+// @version      1.1
 // @description  Autoplayer for Neopets Fetch!
 // @author       @willnjohnson
 // @match        *://*.neopets.com/games/maze/maze.phtml*
 // @grant        none
+// @license      MIT
+// @downloadURL  https://update.greasyfork.org/scripts/580695/Neopets%20Fetch%21%20Autoplayer.user.js
+// @updateURL    https://update.greasyfork.org/scripts/580695/Neopets%20Fetch%21%20Autoplayer.meta.js
 // ==/UserScript==
 
 (function () {
@@ -16,7 +19,10 @@
     // ==========================================
     const CONFIG = {
         // Difficulty (1: Easy, 2: Medium, 3: Hard, 4: Fiendish, 5: Insane)
-        DIFFICULTY: '4', // CHANGE HERE
+        DIFFICULTY: '3',          // CHANGE HERE
+
+        // Interface options
+        SHOW_MINIMAP: true,       // toggle rendering of the HUD minimap
 
         // Navigation delays (ms)
         MOVE_DELAY_MIN: 1000,     // min delay before next move
@@ -42,9 +48,9 @@
     // Per-direction: col/row delta and movedir URL id
     const STEP = {
         [NORTH]: { dc: 0, dr: -1, moveId: 0 },
-        [WEST]:  { dc: -1, dr: 0, moveId: 2 },
-        [SOUTH]: { dc: 0, dr: 1,  moveId: 1 },
-        [EAST]:  { dc: 1, dr: 0,  moveId: 3 },
+        [WEST]:  { dc: -1, dr: 0,  moveId: 2 },
+        [SOUTH]: { dc: 0,  dr: 1,  moveId: 1 },
+        [EAST]:  { dc: 1,  dr: 0,  moveId: 3 },
     };
 
     const OPPOSITE = {
@@ -156,7 +162,7 @@
         }
 
         // Align position against stored map using small candidate offsets
-        let posCol = state.col, posRow = state.row, aligned = false;
+        let posCol = state.col, posRow = state.row;
         for (const [oc, or] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) {
             let ok = true, vi = 0;
             for (let vr = -2; vr <= 2; vr++) {
@@ -167,7 +173,7 @@
                     if (stored !== undefined && current !== undefined && stored !== current) ok = false;
                 }
             }
-            if (ok) { posCol += oc; posRow += or; aligned = true; break; }
+            if (ok) { posCol += oc; posRow += or; break; }
         }
 
         state.col = posCol;
@@ -235,10 +241,14 @@
             throw e;
         }
 
+        if (CONFIG.SHOW_MINIMAP) {
+            renderMinimap(state, posCol, posRow);
+        } else {
+            const canvas = document.getElementById(MINIMAP_ID);
+            if (canvas) canvas.remove();
+        }
+
         const nextCell = findNextStep(posCol, posRow, targets, state);
-
-        renderMinimap(state, posCol, posRow);
-
         if (!nextCell) return;
 
         const dc = nextCell[0] - posCol, dr = nextCell[1] - posRow;
@@ -261,57 +271,104 @@
             canvas.id = MINIMAP_ID;
             canvas.style.cssText = [
                 'position:fixed',
-                'bottom:10px',
-                'right:10px',
+                'bottom:16px',
+                'right:16px',
                 'z-index:99999',
-                'border:2px solid #444',
+                'border:2px solid #2d3139',
+                'border-radius:6px',
                 'image-rendering:pixelated',
-                'background:#000',
+                'background:#121418',
             ].join(';');
             document.body.appendChild(canvas);
         }
 
-        const cols = state.colMax - state.colMin + 1;
-        const rows = state.rowMax - state.rowMin + 1;
-        canvas.width  = cols * CELL_PX;
-        canvas.height = rows * CELL_PX;
+        const rawCols = state.colMax - state.colMin + 1;
+        const rawRows = state.rowMax - state.rowMin + 1;
+        if (rawCols <= 0 || rawRows <= 0) return;
+
+        // Use the smaller dimension to enforce a uniform square
+        const dim = Math.min(rawCols, rawRows);
+        canvas.width  = dim * CELL_PX;
+        canvas.height = dim * CELL_PX;
 
         const ctx = canvas.getContext('2d');
-        ctx.fillStyle = '#000';
+        ctx.fillStyle = '#121418';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Determine if explicit map walls have been tracked down on each boundary
+        const defaultMinMax = state.gridSize - 1;
+        const leftFound   = state.colMin !== -defaultMinMax;
+        const rightFound  = state.colMax !== defaultMinMax;
+        const topFound    = state.rowMin !== -defaultMinMax;
+        const bottomFound = state.rowMax !== defaultMinMax;
+
+        let renderColMin, renderRowMin;
+        const halfDim = Math.floor(dim / 2);
+
+        // Horizontal camera shift: pin to found edge, otherwise center on active column
+        if (leftFound) {
+            renderColMin = state.colMin;
+        } else if (rightFound) {
+            renderColMin = state.colMax - dim + 1;
+        } else {
+            renderColMin = posCol - halfDim;
+        }
+
+        // Vertical camera shift: pin to found edge, otherwise center on active row
+        if (topFound) {
+            renderRowMin = state.rowMin;
+        } else if (bottomFound) {
+            renderRowMin = state.rowMax - dim + 1;
+        } else {
+            renderRowMin = posRow - halfDim;
+        }
 
         for (const [key, passages] of Object.entries(state.grid)) {
             const [gc, gr] = key.split(',').map(Number);
-            const px = (gc - state.colMin) * CELL_PX;
-            const py = (gr - state.rowMin) * CELL_PX;
+
+            if (gc < renderColMin || gc >= renderColMin + dim || gr < renderRowMin || gr >= renderRowMin + dim) {
+                continue;
+            }
+
+            const px = (gc - renderColMin) * CELL_PX;
+            const py = (gr - renderRowMin) * CELL_PX;
 
             if (passages === 0) {
-                ctx.fillStyle = '#1e1e1e';
-                ctx.fillRect(px, py, CELL_PX, CELL_PX);
+                ctx.fillStyle = '#1a1d24';
+                ctx.fillRect(px + 1, py + 1, CELL_PX - 2, CELL_PX - 2);
             } else if (passages > 0) {
                 const isDeadEnd = (passages & (passages - 1)) === 0;
-                ctx.fillStyle = isDeadEnd ? '#888888' : '#d0d0d0';
-                ctx.fillRect(px + 1, py + 1, CELL_PX - 1, CELL_PX - 1);
-                if (passages & NORTH) { ctx.fillRect(px + 1, py,      CELL_PX - 1, 1); }
-                if (passages & WEST)  { ctx.fillRect(px,     py + 1,  1, CELL_PX - 1); }
+                ctx.fillStyle = isDeadEnd ? '#3a4454' : '#e2e8f0';
+
+                ctx.fillRect(px + 1, py + 1, CELL_PX - 2, CELL_PX - 2);
+
+                if (passages & NORTH) ctx.fillRect(px + 1, py, CELL_PX - 2, 1);
+                if (passages & SOUTH) ctx.fillRect(px + 1, py + CELL_PX - 1, CELL_PX - 2, 1);
+                if (passages & WEST)  ctx.fillRect(px, py + 1, 1, CELL_PX - 2);
+                if (passages & EAST)  ctx.fillRect(px + CELL_PX - 1, py + 1, 1, CELL_PX - 2);
             }
         }
 
         if (state.exitPos) {
             const [ec, er] = state.exitPos;
-            ctx.fillStyle = '#ffee00';
-            ctx.fillRect((ec - state.colMin) * CELL_PX + 1, (er - state.rowMin) * CELL_PX + 1, CELL_PX - 1, CELL_PX - 1);
+            if (ec >= renderColMin && ec < renderColMin + dim && er >= renderRowMin && er < renderRowMin + dim) {
+                ctx.fillStyle = '#ffb703';
+                ctx.fillRect((ec - renderColMin) * CELL_PX + 1, (er - renderRowMin) * CELL_PX + 1, CELL_PX - 2, CELL_PX - 2);
+            }
         }
 
         if (state.itemPos) {
             const [ic, ir] = state.itemPos;
-            ctx.fillStyle = '#00e060';
-            ctx.fillRect((ic - state.colMin) * CELL_PX + 1, (ir - state.rowMin) * CELL_PX + 1, CELL_PX - 1, CELL_PX - 1);
+            if (ic >= renderColMin && ic < renderColMin + dim && ir >= renderRowMin && ir < renderRowMin + dim) {
+                ctx.fillStyle = '#06d6a0';
+                ctx.fillRect((ic - renderColMin) * CELL_PX + 1, (ir - renderRowMin) * CELL_PX + 1, CELL_PX - 2, CELL_PX - 2);
+            }
         }
 
-        // Player: red
-        ctx.fillStyle = '#ff3333';
-        ctx.fillRect((posCol - state.colMin) * CELL_PX + 1, (posRow - state.rowMin) * CELL_PX + 1, CELL_PX - 1, CELL_PX - 1);
+        if (posCol >= renderColMin && posCol < renderColMin + dim && posRow >= renderRowMin && posRow < renderRowMin + dim) {
+            ctx.fillStyle = '#ef476f';
+            ctx.fillRect((posCol - renderColMin) * CELL_PX + 1, (posRow - renderRowMin) * CELL_PX + 1, CELL_PX - 2, CELL_PX - 2);
+        }
     }
 
     function computeTargets(state, hasItem) {
@@ -321,7 +378,6 @@
             if (state.exitPos) {
                 targets.push(state.exitPos);
             } else {
-                // Exit is on far edge — enumerate plausible edge cells
                 const edge = [];
                 if (state.colMin === 0) for (let r = state.rowMin; r <= state.rowMax; r++) edge.push([state.colMax, r]);
                 if (state.colMax === 0) for (let r = state.rowMin; r <= state.rowMax; r++) edge.push([state.colMin, r]);
@@ -344,7 +400,6 @@
             if (state.itemPos) {
                 targets.push(state.itemPos);
             } else {
-                // Explore unmapped cells in inner half where item spawns
                 const inset = Math.floor(state.gridSize / 2) - 1;
                 for (let c = state.colMin + inset; c <= state.colMax - inset; c++)
                     for (let r = state.rowMin + inset; r <= state.rowMax - inset; r++)
@@ -391,7 +446,6 @@
 
         if (!goalCell) return null;
 
-        // Trace back to find first step from start
         let current = goalCell, previous = null;
         while (current) {
             const prev = cameFrom[`${current[0]},${current[1]}`];
