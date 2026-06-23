@@ -1,40 +1,35 @@
 // ==UserScript==
 // @name         Neopets Fetch! Helper
 // @namespace    GreaseMonkey
-// @version      1.0
-// @description  Highlights recommended compass direction for Neopets Fetch!
+// @version      1.1
+// @description  Highlights recommended compass direction and displays mini-map for Neopets Fetch! Also supports WASD.
 // @author       @willnjohnson
 // @match        *://*.neopets.com/games/maze/maze.phtml*
 // @grant        none
+// @license      MIT
+// @downloadURL  https://update.greasyfork.org/scripts/580694/Neopets%20Fetch%21%20Helper.user.js
+// @updateURL    https://update.greasyfork.org/scripts/580694/Neopets%20Fetch%21%20Helper.meta.js
 // ==/UserScript==
-
-/*
-	This helper supports
-   - WASD / Arrow Keys navigation
-   - Move recommendation (direction highlighted in magenta)
-   - A mini-map to visualize where the player has navigated to
-*/
 
 (function () {
     'use strict';
 
     // ==========================================
-    // USER CONFIGURATION (can change tile cost, but not necessary)
+    // USER CONFIGURATION
     // ==========================================
     const CONFIG = {
-        // Pathfinding
-        UNKNOWN_TILE_COST: 3      // penalty for stepping into unmapped tiles
+        UNKNOWN_TILE_COST: 3,    // penalty for stepping into unmapped tiles
+        SHOW_MINIMAP: true,      // toggle rendering of the HUD minimap
+        SHOW_COMPASS_HINT: true  // toggle magenta compass move recommendations
     };
     // ==========================================
 
-    // Cardinal direction bitmasks
     const NORTH = 1;
     const WEST = 2;
     const SOUTH = 4;
     const EAST = 8;
     const ALL_DIRS = [NORTH, WEST, SOUTH, EAST];
 
-    // Per-direction: col/row delta and movedir URL id
     const STEP = {
         [NORTH]: { dc: 0, dr: -1, moveId: 0 },
         [WEST]: { dc: -1, dr: 0, moveId: 2 },
@@ -46,10 +41,8 @@
         [NORTH]: SOUTH, [WEST]: EAST, [SOUTH]: NORTH, [EAST]: WEST,
     };
 
-    // Grid width/height per difficulty level
     const GRID_SIZE = { '1': 10, '2': 15, '3': 20, '4': 25, '5': 30 };
 
-    // Tile image name -> open-passage bitmask
     const TILE_PASSAGES = {
         'path_iso': 0,
         'path_u': NORTH,
@@ -69,22 +62,19 @@
         'path_x': NORTH | WEST | SOUTH | EAST,
     };
 
-    // Bounding boxes (px) for each compass direction within 150x150 image
-    // Derived from <area> poly coords in page source
     const COMPASS_REGION = {
-        0: { left: 57, top: 0, width: 34, height: 57 },  // North
-        1: { left: 64, top: 91, width: 34, height: 58 },  // South
-        2: { left: 0, top: 58, width: 64, height: 33 },  // West
-        3: { left: 97, top: 56, width: 52, height: 33 },  // East
+        0: { left: 57, top: 0, width: 34, height: 57 },
+        1: { left: 64, top: 91, width: 34, height: 58 },
+        2: { left: 0, top: 58, width: 64, height: 33 },
+        3: { left: 97, top: 56, width: 52, height: 33 },
     };
 
     const STORAGE_KEY = 'neopets_fetch_state';
-    const PREF_KEY = 'neopets_fetch_pref';  // persists user difficulty choice
+    const PREF_KEY = 'neopets_fetch_pref';
     const OVERLAY_ID = 'fetch-helper-highlight';
     const MINIMAP_ID = 'fetch-helper-minimap';
-    const CELL_PX = 10; // pixels per maze cell on minimap
+    const CELL_PX = 10;
 
-    // Key -> movedir id (matches movedir URL param values)
     const KEY_MAP = {
         'ArrowUp': 0, 'w': 0, 'W': 0,
         'ArrowDown': 1, 's': 1, 'S': 1,
@@ -94,7 +84,6 @@
 
     function attachKeyboardControls() {
         document.addEventListener('keydown', (e) => {
-            // Ignore keypresses while typing in input/textarea fields
             const tag = document.activeElement && document.activeElement.tagName;
             if (tag === 'INPUT' || tag === 'TEXTAREA') return;
 
@@ -110,28 +99,24 @@
     function helper() {
         const html = document.body.innerHTML;
 
-        // Clear state on end screens; user navigates manually
         if (html.includes('Success! You fetched the item and reached the exit!') ||
             html.includes('Your master is very displeased!')) {
             localStorage.removeItem(STORAGE_KEY);
             return;
         }
 
-        // Difficulty selection page
         const diffLinks = document.querySelectorAll('a[href*="create=1&diff="]');
         if (diffLinks.length > 0) {
             handleDiffPage(diffLinks);
             return;
         }
 
-        // Briefing page: init tracking state so first maze turn has context
         const enterBtn = document.querySelector('input[value="Enter the Maze!"]');
         if (enterBtn) {
             initState();
             return;
         }
 
-        // Only run on active maze pages
         if (!/Moves Remaining:\s*<b>(\d+)/.test(html)) return;
 
         attachKeyboardControls();
@@ -140,14 +125,12 @@
 
     function handleDiffPage(diffLinks) {
         const prefs = JSON.parse(localStorage.getItem(PREF_KEY) || '{}');
-        const saved = prefs.difficulty || null;
 
         diffLinks.forEach(link => {
             const match = link.href.match(/diff=(\d)/);
             if (!match) return;
             const diff = match[1];
 
-            // Save chosen difficulty before navigating
             link.addEventListener('click', () => {
                 const p = JSON.parse(localStorage.getItem(PREF_KEY) || '{}');
                 p.difficulty = diff;
@@ -174,22 +157,19 @@
     }
 
     function takeTurn(html) {
-        // Init fresh state if none exists (e.g. user started game manually)
         let raw = localStorage.getItem(STORAGE_KEY);
         if (!raw) { initState(); raw = localStorage.getItem(STORAGE_KEY); }
 
         const state = JSON.parse(raw);
 
-        // Find 5x5 tile table
         let tileTable = null;
         for (const t of document.querySelectorAll('table[width="400"]')) {
-            if (t.querySelectorAll('td[background*="games/maze"]').length === 25) {
+            if (t.querySelectorAll('td').length === 25) {
                 tileTable = t; break;
             }
         }
         if (!tileTable) return;
 
-        // Read 25 viewport tiles
         const cells = tileTable.querySelectorAll('td');
         const viewport = [];
         for (let i = 0; i < 25; i++) {
@@ -198,7 +178,6 @@
             viewport.push({ tileName: hit ? hit[1] : null, cellHTML: cell.innerHTML });
         }
 
-        // Align position against stored map using small candidate offsets
         let posCol = state.col, posRow = state.row;
         for (const [oc, or] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) {
             let ok = true, vi = 0;
@@ -216,7 +195,6 @@
         state.col = posCol;
         state.row = posRow;
 
-        // Ingest viewport into map
         let vi = 0;
         for (let vr = -2; vr <= 2; vr++) {
             for (let vc = -2; vc <= 2; vc++) {
@@ -231,7 +209,6 @@
                     state.itemPos = [gc, gr];
                 }
 
-                // Void tiles tighten known boundary
                 if (passages === 0) {
                     if (vc === 0) {
                         if (vr < 0) { state.rowMin = Math.max(state.rowMin, posRow + vr + 1); state.rowMax = state.rowMin + state.gridSize - 1; }
@@ -241,13 +218,16 @@
                         if (vc < 0) { state.colMin = Math.max(state.colMin, posCol + vc + 1); state.colMax = state.colMin + state.gridSize - 1; }
                         else if (vc > 0) { state.colMax = Math.min(state.colMax, posCol + vc - 1); state.colMin = state.colMax - state.gridSize + 1; }
                     }
+                    
+                    if (state.colMin > state.colMax) { const tmp = state.colMin; state.colMin = state.colMax; state.colMax = tmp; }
+                    if (state.rowMin > state.rowMax) { const tmp = state.rowMin; state.rowMin = state.rowMax; state.rowMax = tmp; }
                 }
 
-                // Passage leading out of bounds marks exit tile
                 if (gc >= state.colMin && gc <= state.colMax && gr >= state.rowMin && gr <= state.rowMax) {
                     for (const dir of ALL_DIRS) {
                         const nc = gc + STEP[dir].dc, nr = gr + STEP[dir].dr;
-                        if ((passages & dir) && !(nc >= state.colMin && nc <= state.colMax && nr >= state.rowMin && nr <= state.rowMax)) {
+                        const outside = !(nc >= state.colMin && nc <= state.colMax && nr >= state.rowMin && nr <= state.rowMax);
+                        if ((passages & dir) && outside) {
                             state.exitPos = [gc, gr];
                         }
                     }
@@ -257,7 +237,6 @@
 
         const targets = computeTargets(state, !html.includes('Searching for:'));
 
-        // Prune drifted cells outside bounds to prevent storage growth
         const margin = 3;
         for (const key of Object.keys(state.grid)) {
             const [gc, gr] = key.split(',').map(Number);
@@ -277,32 +256,39 @@
             throw e;
         }
 
+        if (CONFIG.SHOW_MINIMAP) {
+            renderMinimap(state, posCol, posRow);
+        } else {
+            const canvas = document.getElementById(MINIMAP_ID);
+            if (canvas) canvas.remove();
+        }
+
         const nextCell = findNextStep(posCol, posRow, targets, state);
         if (!nextCell) return;
 
-        const dc = nextCell[0] - posCol, dr = nextCell[1] - posRow;
-        let moveId = null;
-        for (const dir of ALL_DIRS) {
-            if (STEP[dir].dc === dc && STEP[dir].dr === dr) { moveId = STEP[dir].moveId; break; }
+        if (CONFIG.SHOW_COMPASS_HINT) {
+            const dc = nextCell[0] - posCol, dr = nextCell[1] - posRow;
+            let moveId = null;
+            for (const dir of ALL_DIRS) {
+                if (STEP[dir].dc === dc && STEP[dir].dr === dr) { moveId = STEP[dir].moveId; break; }
+            }
+            if (moveId !== null) highlightCompass(moveId);
+        } else {
+            const old = document.getElementById(OVERLAY_ID);
+            if (old) old.remove();
         }
-
-        if (moveId !== null) highlightCompass(moveId);
-        renderMinimap(state, posCol, posRow);
     }
 
     function highlightCompass(moveId) {
-        const compass = document.getElementById('thecompass') ||
-            document.querySelector('img[usemap="#navmap"]');
+        const compass = document.getElementById('thecompass') || document.querySelector('img[usemap="#navmap"]');
         if (!compass) return;
 
-        // Remove stale overlay
         const old = document.getElementById(OVERLAY_ID);
         if (old) old.remove();
 
         const region = COMPASS_REGION[moveId];
         if (!region) return;
 
-        // Wrap compass in relative container if not already
         const parent = compass.parentElement;
         if (getComputedStyle(parent).position === 'static') {
             parent.style.position = 'relative';
@@ -333,63 +319,104 @@
             canvas.id = MINIMAP_ID;
             canvas.style.cssText = [
                 'position:fixed',
-                'bottom:10px',
-                'right:10px',
+                'bottom:16px',
+                'right:16px',
                 'z-index:99999',
-                'border:2px solid #444',
+                'border:2px solid #2d3139',
+                'border-radius:6px',
                 'image-rendering:pixelated',
-                'background:#000',
+                'background:#121418',
             ].join(';');
             document.body.appendChild(canvas);
         }
 
-        const cols = state.colMax - state.colMin + 1;
-        const rows = state.rowMax - state.rowMin + 1;
-        canvas.width = cols * CELL_PX;
-        canvas.height = rows * CELL_PX;
+        const rawCols = state.colMax - state.colMin + 1;
+        const rawRows = state.rowMax - state.rowMin + 1;
+        if (rawCols <= 0 || rawRows <= 0) return;
+
+        const dim = Math.min(rawCols, rawRows);
+        canvas.width  = dim * CELL_PX;
+        canvas.height = dim * CELL_PX;
 
         const ctx = canvas.getContext('2d');
-        ctx.fillStyle = '#000';
+        ctx.fillStyle = '#121418';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-        // Draw each known cell
+        // Determine if specific outer boundaries have been established
+        const defaultMinMax = state.gridSize - 1;
+        const leftFound   = state.colMin !== -defaultMinMax;
+        const rightFound  = state.colMax !== defaultMinMax;
+        const topFound    = state.rowMin !== -defaultMinMax;
+        const bottomFound = state.rowMax !== defaultMinMax;
+
+        // Dynamic Camera Viewport Window Math
+        let renderColMin, renderRowMin;
+        const halfDim = Math.floor(dim / 2);
+
+        // Calculate dynamic viewport pinning offset for horizontal axis
+        if (leftFound) {
+            renderColMin = state.colMin;
+        } else if (rightFound) {
+            renderColMin = state.colMax - dim + 1;
+        } else {
+            renderColMin = posCol - halfDim;
+        }
+
+        // Calculate dynamic viewport pinning offset for vertical axis
+        if (topFound) {
+            renderRowMin = state.rowMin;
+        } else if (bottomFound) {
+            renderRowMin = state.rowMax - dim + 1;
+        } else {
+            renderRowMin = posRow - halfDim;
+        }
+
         for (const [key, passages] of Object.entries(state.grid)) {
             const [gc, gr] = key.split(',').map(Number);
-            const px = (gc - state.colMin) * CELL_PX;
-            const py = (gr - state.rowMin) * CELL_PX;
+
+            if (gc < renderColMin || gc >= renderColMin + dim || gr < renderRowMin || gr >= renderRowMin + dim) {
+                continue;
+            }
+
+            const px = (gc - renderColMin) * CELL_PX;
+            const py = (gr - renderRowMin) * CELL_PX;
 
             if (passages === 0) {
-                // Void/solid wall tile
-                ctx.fillStyle = '#1e1e1e';
-                ctx.fillRect(px, py, CELL_PX, CELL_PX);
+                ctx.fillStyle = '#1a1d24';
+                ctx.fillRect(px + 1, py + 1, CELL_PX - 2, CELL_PX - 2);
             } else if (passages > 0) {
-                // Dead end: only one passage open
                 const isDeadEnd = (passages & (passages - 1)) === 0;
-                ctx.fillStyle = isDeadEnd ? '#888888' : '#d0d0d0';
-                ctx.fillRect(px + 1, py + 1, CELL_PX - 1, CELL_PX - 1);
-                // Open gap into adjacent cells where passage exists
-                if (passages & NORTH) { ctx.fillRect(px + 1, py, CELL_PX - 1, 1); }
-                if (passages & WEST) { ctx.fillRect(px, py + 1, 1, CELL_PX - 1); }
+                ctx.fillStyle = isDeadEnd ? '#3a4454' : '#e2e8f0';
+
+                ctx.fillRect(px + 1, py + 1, CELL_PX - 2, CELL_PX - 2);
+
+                if (passages & NORTH) ctx.fillRect(px + 1, py, CELL_PX - 2, 1);
+                if (passages & SOUTH) ctx.fillRect(px + 1, py + CELL_PX - 1, CELL_PX - 2, 1);
+                if (passages & WEST)  ctx.fillRect(px, py + 1, 1, CELL_PX - 2);
+                if (passages & EAST)  ctx.fillRect(px + CELL_PX - 1, py + 1, 1, CELL_PX - 2);
             }
         }
 
-        // Exit: yellow
         if (state.exitPos) {
             const [ec, er] = state.exitPos;
-            ctx.fillStyle = '#ffee00';
-            ctx.fillRect((ec - state.colMin) * CELL_PX + 1, (er - state.rowMin) * CELL_PX + 1, CELL_PX - 1, CELL_PX - 1);
+            if (ec >= renderColMin && ec < renderColMin + dim && er >= renderRowMin && er < renderRowMin + dim) {
+                ctx.fillStyle = '#ffb703';
+                ctx.fillRect((ec - renderColMin) * CELL_PX + 1, (er - renderRowMin) * CELL_PX + 1, CELL_PX - 2, CELL_PX - 2);
+            }
         }
 
-        // Item: green
         if (state.itemPos) {
             const [ic, ir] = state.itemPos;
-            ctx.fillStyle = '#00e060';
-            ctx.fillRect((ic - state.colMin) * CELL_PX + 1, (ir - state.rowMin) * CELL_PX + 1, CELL_PX - 1, CELL_PX - 1);
+            if (ic >= renderColMin && ic < renderColMin + dim && ir >= renderRowMin && ir < renderRowMin + dim) {
+                ctx.fillStyle = '#06d6a0';
+                ctx.fillRect((ic - renderColMin) * CELL_PX + 1, (ir - renderRowMin) * CELL_PX + 1, CELL_PX - 2, CELL_PX - 2);
+            }
         }
 
-        // Player: red
-        ctx.fillStyle = '#ff3333';
-        ctx.fillRect((posCol - state.colMin) * CELL_PX + 1, (posRow - state.rowMin) * CELL_PX + 1, CELL_PX - 1, CELL_PX - 1);
+        if (posCol >= renderColMin && posCol < renderColMin + dim && posRow >= renderRowMin && posRow < renderRowMin + dim) {
+            ctx.fillStyle = '#ef476f';
+            ctx.fillRect((posCol - renderColMin) * CELL_PX + 1, (posRow - renderRowMin) * CELL_PX + 1, CELL_PX - 2, CELL_PX - 2);
+        }
     }
 
     function computeTargets(state, hasItem) {
@@ -399,7 +426,6 @@
             if (state.exitPos) {
                 targets.push(state.exitPos);
             } else {
-                // Exit is on far edge — enumerate plausible edge cells
                 const edge = [];
                 if (state.colMin === 0) for (let r = state.rowMin; r <= state.rowMax; r++) edge.push([state.colMax, r]);
                 if (state.colMax === 0) for (let r = state.rowMin; r <= state.rowMax; r++) edge.push([state.colMin, r]);
@@ -422,7 +448,6 @@
             if (state.itemPos) {
                 targets.push(state.itemPos);
             } else {
-                // Explore unmapped cells in inner half where item spawns
                 const inset = Math.floor(state.gridSize / 2) - 1;
                 for (let c = state.colMin + inset; c <= state.colMax - inset; c++)
                     for (let r = state.rowMin + inset; r <= state.rowMax - inset; r++)
@@ -450,7 +475,7 @@
             const inBounds = col >= state.colMin && col <= state.colMax && row >= state.rowMin && row <= state.rowMax;
             if (!(key in state.grid) && !inBounds) continue;
 
-            cameFrom[key] = from;
+            cameFrom[key] = from ? `${from[0]},${from[1]}` : null;
 
             if (targets.some(([tc, tr]) => tc === col && tr === row)) { goalCell = [col, row]; break; }
 
@@ -464,18 +489,20 @@
                 }
             }
 
-            if (++iterations > 5000) break;
+            if (++iterations > 15000) break;
         }
 
         if (!goalCell) return null;
 
-        // Trace back to find first step from start
-        let current = goalCell, previous = null;
-        while (current) {
-            const prev = cameFrom[`${current[0]},${current[1]}`];
-            if (!prev) break;
-            previous = current;
-            current = prev;
+        let currentKey = `${goalCell[0]},${goalCell[1]}`;
+        let previous = goalCell;
+        const startKey = `${startCol},${startRow}`;
+
+        while (currentKey && currentKey !== startKey) {
+            const prevStr = cameFrom[currentKey];
+            if (!prevStr) break;
+            previous = currentKey.split(',').map(Number);
+            currentKey = prevStr;
         }
         return previous;
     }
